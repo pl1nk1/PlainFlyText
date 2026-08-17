@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Dalamud
+        uses: Blooym/setup-dalamud@v1
+        with:
+          branch: release
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          "version=$version.0" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build PlainFlyText/PlainFlyText.csproj -c Release -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Locate build output
+        id: package
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Recurse -Filter latest.zip -Path PlainFlyText/bin/Release | Select-Object -First 1
+          $manifest = Get-ChildItem -Recurse -Filter PlainFlyText.json -Path PlainFlyText/bin/Release/net10.0-windows/PlainFlyText | Select-Object -First 1
+          "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "manifest=$($manifest.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+
+      - name: Update pluginmaster.json
+        shell: pwsh
+        run: |
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/latest.zip"
+          $epoch = [int][double]::Parse((Get-Date -UFormat %s))
+
+          $manifest = Get-Content '${{ steps.package.outputs.manifest }}' | ConvertFrom-Json
+          $manifest | Add-Member -NotePropertyName DownloadLinkInstall -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName DownloadLinkUpdate -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName DownloadLinkTesting -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName LastUpdate -NotePropertyValue $epoch -Force
+
+          @($manifest) | ConvertTo-Json -Depth 10 | Set-Content pluginmaster.json
+
+      - name: Commit pluginmaster.json
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pluginmaster.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "No changes to pluginmaster.json"
+          } else {
+            git commit -m "Update pluginmaster.json for ${{ github.ref_name }}"
+            git push origin HEAD:main
+          }
