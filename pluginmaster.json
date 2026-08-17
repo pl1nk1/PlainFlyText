@@ -1,20 +1,22 @@
-{
-  "Author": "pl1nk1",
-  "Name": "Plain Fly Text",
-  "InternalName": "PlainFlyText",
-  "AssemblyVersion": "1.0.1.0",
-  "Description": "Removes the skill/ability name label from floating combat text, leaving only the number, color, size, and crit/direct-hit bounce animation.",
-  "ApplicableVersion": "any",
-  "RepoUrl": "https://github.com/pl1nk1/PlainFlyText",
-  "DalamudApiLevel": 15,
-  "LoadRequiredState": 0,
-  "LoadSync": false,
-  "CanUnloadAsync": true,
-  "LoadPriority": 0,
-  "Punchline": "Removes skill-name labels from floating combat text, leaving just the number.",
-  "AcceptsFeedback": true,
-  "DownloadLinkInstall": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
-  "DownloadLinkUpdate": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
-  "DownloadLinkTesting": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
-  "LastUpdate": 1786996667
-}
+[
+  {
+    "Author": "pl1nk1",
+    "Name": "Plain Fly Text",
+    "InternalName": "PlainFlyText",
+    "AssemblyVersion": "1.0.1.0",
+    "Description": "Removes the skill/ability name label from floating combat text, leaving only the number, color, size, and crit/direct-hit bounce animation.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/pl1nk1/PlainFlyText",
+    "DalamudApiLevel": 15,
+    "LoadRequiredState": 0,
+    "LoadSync": false,
+    "CanUnloadAsync": true,
+    "LoadPriority": 0,
+    "Punchline": "Removes skill-name labels from floating combat text, leaving just the number.",
+    "AcceptsFeedback": true,
+    "DownloadLinkInstall": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
+    "DownloadLinkTesting": "https://github.com/pl1nk1/PlainFlyText/releases/download/v1.0.1/latest.zip",
+    "LastUpdate": 1786996667
+  }
+]

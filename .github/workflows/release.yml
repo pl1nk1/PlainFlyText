@@ -69,7 +69,10 @@ jobs:
           $manifest | Add-Member -NotePropertyName DownloadLinkTesting -NotePropertyValue $downloadUrl -Force
           $manifest | Add-Member -NotePropertyName LastUpdate -NotePropertyValue $epoch -Force
 
-          @($manifest) | ConvertTo-Json -Depth 10 | Set-Content pluginmaster.json
+          # -InputObject (not a pipe) is required here: piping a 1-element array
+          # into ConvertTo-Json unwraps it back to a bare object, which Dalamud's
+          # PluginRepository rejects (it requires a top-level JSON array).
+          ConvertTo-Json -InputObject @($manifest) -Depth 10 | Set-Content pluginmaster.json
 
       - name: Commit pluginmaster.json
         shell: pwsh
