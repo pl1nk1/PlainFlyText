@@ -1,6 +1,9 @@
+using System;
 using System.Collections.Generic;
+using Dalamud.Game.Command;
 using Dalamud.Game.Gui.FlyText;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -9,7 +12,13 @@ namespace PlainFlyText;
 
 public sealed class Plugin : IDalamudPlugin
 {
+    private const string CommandName = "/plainflytext";
+
     [PluginService] internal static IFlyTextGui FlyTextGui { get; private set; } = null!;
+    [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
+    [PluginService] internal static IGameInteropProvider GameInteropProvider { get; private set; } = null!;
+    [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
 
     // FlyTextKind values that show a redundant skill/ability-name label (Text1) and/or
     // subtitle (Text2) next to a damage/healing/resource number (Val1). Confirmed against
@@ -32,9 +41,35 @@ public sealed class Plugin : IDalamudPlugin
         FlyTextKind.MpDrain,
     ];
 
+    private readonly Configuration config;
+    private readonly WindowSystem windowSystem;
+    private readonly FlyTextSpeedHook speedHook;
+    private readonly ConfigWindow configWindow;
+    private readonly Action openConfigUiHandler;
+
     public Plugin()
     {
+        config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+
+        windowSystem = new WindowSystem("PlainFlyText");
+
+        speedHook = new FlyTextSpeedHook(config);
+        speedHook.Initialize(GameInteropProvider, Log);
+
+        configWindow = new ConfigWindow(config, PluginInterface, speedHook);
+        windowSystem.AddWindow(configWindow);
+
         FlyTextGui.FlyTextCreated += OnFlyTextCreated;
+
+        PluginInterface.UiBuilder.Draw += windowSystem.Draw;
+
+        openConfigUiHandler = () => configWindow.IsOpen = true;
+        PluginInterface.UiBuilder.OpenConfigUi += openConfigUiHandler;
+
+        CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Open PlainFlyText settings.",
+        });
     }
 
     private void OnFlyTextCreated(
@@ -60,8 +95,16 @@ public sealed class Plugin : IDalamudPlugin
         // so the number itself, its color-coding, and crit/DH bounce are unaffected.
     }
 
+    private void OnCommand(string command, string args) => configWindow.IsOpen = true;
+
     public void Dispose()
     {
+        CommandManager.RemoveHandler(CommandName);
+        PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
+        PluginInterface.UiBuilder.OpenConfigUi -= openConfigUiHandler;
         FlyTextGui.FlyTextCreated -= OnFlyTextCreated;
+
+        speedHook.Dispose();
+        windowSystem.RemoveAllWindows();
     }
 }
