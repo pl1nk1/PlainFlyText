@@ -84,8 +84,8 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
         var addon = gameGui.GetAddonByName<AddonFlyText>("FlyText");
         if (addon != null && addon->RootNode != null)
         {
-            var resetCount = 0;
-            ApplyScaleToLeaves(addon->RootNode, 1.0f, 0, ref resetCount);
+            var stats = default(TraversalStats);
+            ApplyScaleToLeaves(addon->RootNode, 1.0f, 0, ref stats);
         }
 
         hook?.Disable();
@@ -97,11 +97,23 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
         hook!.Original(thisPtr, delta * config.SpeedMultiplier);
 
         var targetScale = config.SizeScalingEnabled ? config.SizeMultiplier : 1.0f;
-        var scaledCount = 0;
+        var stats = default(TraversalStats);
 
+        // Count the root's direct children by walking the sibling chain ourselves,
+        // independent of the recursive pass below, so the log can directly compare
+        // this against the node's own reported ChildCount - if they disagree, the
+        // ChildNode/NextSiblingNode traversal assumption itself is wrong.
+        var directChildren = 0;
         if (thisPtr->RootNode != null)
         {
-            ApplyScaleToLeaves(thisPtr->RootNode, targetScale, 0, ref scaledCount);
+            var sibling = thisPtr->RootNode->ChildNode;
+            while (sibling != null && directChildren < MaxNodesPerPass)
+            {
+                directChildren++;
+                sibling = sibling->NextSiblingNode;
+            }
+
+            ApplyScaleToLeaves(thisPtr->RootNode, targetScale, 0, ref stats);
         }
 
         if (config.SizeScalingEnabled)
@@ -111,10 +123,17 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
             {
                 diagnosticLogTimer = 0f;
                 log?.Information(
-                    "PlainFlyText: size scaling pass touched {Count} leaf node(s) (root ChildCount={ChildCount}, target={Target}x).",
-                    scaledCount,
+                    "PlainFlyText: root.ChildCount={ChildCount} vs walked {Walked} direct child(ren); " +
+                    "full traversal visited {Visited} node(s), max depth {Depth}, {Leaves} leaf/leaves scaled " +
+                    "to {Target}x. Sample leaf: type={LeafType} scale={LeafScale}.",
                     thisPtr->RootNode != null ? thisPtr->RootNode->ChildCount : (ushort)0,
-                    targetScale);
+                    directChildren,
+                    stats.TotalVisited,
+                    stats.MaxDepth,
+                    stats.LeavesScaled,
+                    targetScale,
+                    stats.SampleLeafType,
+                    stats.SampleLeafScale);
             }
         }
         else
@@ -123,25 +142,47 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
         }
     }
 
-    private static void ApplyScaleToLeaves(AtkResNode* node, float scale, int depth, ref int scaledCount)
+    private struct TraversalStats
     {
-        if (node == null || depth > MaxRecursionDepth || scaledCount > MaxNodesPerPass)
+        public int TotalVisited;
+        public int LeavesScaled;
+        public int MaxDepth;
+        public NodeType SampleLeafType;
+        public float SampleLeafScale;
+    }
+
+    private static void ApplyScaleToLeaves(AtkResNode* node, float scale, int depth, ref TraversalStats stats)
+    {
+        if (node == null || depth > MaxRecursionDepth || stats.TotalVisited > MaxNodesPerPass)
         {
             return;
+        }
+
+        stats.TotalVisited++;
+        if (depth > stats.MaxDepth)
+        {
+            stats.MaxDepth = depth;
         }
 
         if (node->ChildCount == 0)
         {
             node->ScaleX = scale;
             node->ScaleY = scale;
-            scaledCount++;
+
+            if (stats.LeavesScaled == 0)
+            {
+                stats.SampleLeafType = node->Type;
+                stats.SampleLeafScale = node->ScaleX;
+            }
+
+            stats.LeavesScaled++;
             return;
         }
 
         var child = node->ChildNode;
         while (child != null)
         {
-            ApplyScaleToLeaves(child, scale, depth + 1, ref scaledCount);
+            ApplyScaleToLeaves(child, scale, depth + 1, ref stats);
             child = child->NextSiblingNode;
         }
     }
