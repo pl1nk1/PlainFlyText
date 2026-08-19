@@ -6,33 +6,28 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace PlainFlyText;
 
-// Hooks the native FlyText addon's Update(float delta) virtual function - resolved via
-// FFXIVClientStructs' own maintained AddonFlyText.StaticVirtualTablePointer, not a
-// hand-rolled signature, so this rides on FFXIVClientStructs' upkeep across game
+// Hooks two native FlyText addon virtual functions - both resolved via
+// FFXIVClientStructs' own maintained AddonFlyText.StaticVirtualTablePointer, not
+// hand-rolled signatures, so this rides on FFXIVClientStructs' upkeep across game
 // patches rather than our own guess.
 //
-// Handles two independent, additive tweaks from inside the same hook:
-//  - Speed: multiplies the delta passed to the addon's own native update logic.
-//  - Size (experimental): walks the addon's node tree AFTER calling the native
-//    Update and writes ScaleX/ScaleY directly on leaf nodes (ChildCount == 0 -
-//    i.e. nodes with no children of their own, which should be the actual
-//    text/image glyph nodes rather than container/collision nodes). Only leaves
-//    are touched deliberately, to avoid compounding scale through ancestor nodes
-//    if a container and its child were both scaled (1.5x container * 1.5x child
-//    would render as 2.25x, not 1.5x).
-//
-//    This replaced an earlier attempt that called AtkUnitBase.SetScale on the
-//    whole window - that call demonstrably reaches the vtable (confirmed via
-//    FFXIVClientStructs' own decompiled source) but visibly did nothing, which
-//    suggests FlyText's individual pop-ups aren't driven by the window's own
-//    scale during rendering. Diagnostic logging below reports how many leaf
-//    nodes get touched each pass, since we can't test this live - if the count
-//    is 0 or stays flat regardless of on-screen flytext activity, that's a sign
-//    this hierarchy assumption is wrong too and needs rethinking with real data
-//    from /xllog rather than another blind guess.
+//  - Update(float delta): multiplies the delta passed to the addon's own native
+//    update logic, for the speed slider. Confirmed working.
+//  - Draw(): for the size slider (experimental), walks the addon's node tree and
+//    writes ScaleX/ScaleY directly on leaf nodes (ChildCount == 0, and - critically
+//    - descending into Component nodes' own AtkUldManager.NodeList first, since
+//    those report ChildCount==0 themselves despite wrapping real children in a
+//    separate array; see ApplyScaleToLeaves). Applied immediately before calling
+//    the native Draw so our value is current at the exact moment rendering reads
+//    node state - this used to be applied from inside Update instead, which
+//    write-confirmed correctly (read back as the target value right after
+//    writing) but still rendered at native size, suggesting something between
+//    Update and Draw was resetting it. Diagnostic logging (throttled) reports
+//    what got touched each pass, since none of this can be verified without
+//    live testing.
 //
 // Neither tweak touches position, font, or the label-blanking behavior in
-// Plugin.cs - speed only ever changes the delta value, and size only ever writes
+// Plugin.cs - speed only changes the delta value, and size only ever writes
 // node-local scale fields, so everything else about flytext stays native.
 internal sealed unsafe class FlyTextSpeedHook : IDisposable
 {
@@ -43,7 +38,8 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
     private readonly Configuration config;
     private readonly IGameGui gameGui;
 
-    private Hook<UpdateDelegate>? hook;
+    private Hook<UpdateDelegate>? updateHook;
+    private Hook<DrawDelegate>? drawHook;
     private IPluginLog? log;
     private float diagnosticLogTimer;
 
@@ -57,23 +53,31 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
 
     private delegate void UpdateDelegate(AddonFlyText* thisPtr, float delta);
 
+    private delegate void DrawDelegate(AddonFlyText* thisPtr);
+
     public void Initialize(IGameInteropProvider gameInteropProvider, IPluginLog pluginLog)
     {
         log = pluginLog;
 
         try
         {
-            var updateAddress = (nint)AddonFlyText.StaticVirtualTablePointer->Update;
-            hook = gameInteropProvider.HookFromAddress<UpdateDelegate>(updateAddress, Detour);
-            hook.Enable();
+            var vtable = AddonFlyText.StaticVirtualTablePointer;
+
+            updateHook = gameInteropProvider.HookFromAddress<UpdateDelegate>((nint)vtable->Update, UpdateDetour);
+            updateHook.Enable();
+
+            drawHook = gameInteropProvider.HookFromAddress<DrawDelegate>((nint)vtable->Draw, DrawDetour);
+            drawHook.Enable();
+
             IsAvailable = true;
-            log.Information("PlainFlyText: flytext hook installed.");
+            log.Information("PlainFlyText: flytext hooks installed.");
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "PlainFlyText: failed to install the flytext hook; the speed/size sliders will have no effect.");
+            log.Warning(ex, "PlainFlyText: failed to install the flytext hooks; the speed/size sliders will have no effect.");
             IsAvailable = false;
-            hook = null;
+            updateHook = null;
+            drawHook = null;
         }
     }
 
@@ -88,21 +92,22 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
             ApplyScaleToLeaves(addon->RootNode, 1.0f, 0, ref stats);
         }
 
-        hook?.Disable();
-        hook?.Dispose();
+        updateHook?.Disable();
+        updateHook?.Dispose();
+        drawHook?.Disable();
+        drawHook?.Dispose();
     }
 
-    private void Detour(AddonFlyText* thisPtr, float delta)
+    private void UpdateDetour(AddonFlyText* thisPtr, float delta)
     {
-        hook!.Original(thisPtr, delta * config.SpeedMultiplier);
+        updateHook!.Original(thisPtr, delta * config.SpeedMultiplier);
+    }
 
+    private void DrawDetour(AddonFlyText* thisPtr)
+    {
         var targetScale = config.SizeScalingEnabled ? config.SizeMultiplier : 1.0f;
         var stats = default(TraversalStats);
 
-        // Count the root's direct children by walking the sibling chain ourselves,
-        // independent of the recursive pass below, so the log can directly compare
-        // this against the node's own reported ChildCount - if they disagree, the
-        // ChildNode/NextSiblingNode traversal assumption itself is wrong.
         var directChildren = 0;
         if (thisPtr->RootNode != null)
         {
@@ -118,12 +123,14 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
 
         if (config.SizeScalingEnabled)
         {
-            diagnosticLogTimer += delta;
+            // Draw() has no delta parameter, so throttle off ImGui's frame time
+            // instead - close enough for a diagnostic log interval.
+            diagnosticLogTimer += 1f / 60f;
             if (diagnosticLogTimer >= DiagnosticLogIntervalSeconds)
             {
                 diagnosticLogTimer = 0f;
                 log?.Information(
-                    "PlainFlyText: root.ChildCount={ChildCount} vs walked {Walked} direct child(ren); " +
+                    "PlainFlyText: [Draw] root.ChildCount={ChildCount} vs walked {Walked} direct child(ren); " +
                     "full traversal visited {Visited} node(s) ({Components} component(s) entered), max depth " +
                     "{Depth}, {Leaves} leaf/leaves scaled to {Target}x. Sample leaf: type={LeafType} scale={LeafScale}.",
                     thisPtr->RootNode != null ? thisPtr->RootNode->ChildCount : (ushort)0,
@@ -141,6 +148,8 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
         {
             diagnosticLogTimer = 0f;
         }
+
+        drawHook!.Original(thisPtr);
     }
 
     private struct TraversalStats
