@@ -71,11 +71,9 @@ internal sealed class ConfigWindow : Window
         }
 
         ImGui.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f),
-            "Experimental: scales flytext's individual glyph nodes directly rather than " +
-            "the whole window. Should stay roughly in place, but each node scales from " +
-            "its own corner, so text may look slightly offset from where it'd normally " +
-            "sit, especially at larger values. Check /xllog for diagnostic output while " +
-            "this is on. Try it and see.");
+            "Experimental: scales the font size of flytext's individual text nodes " +
+            "directly, based on each node's own native size at the moment it's first " +
+            "seen. Check /xllog for diagnostic output while this is on. Try it and see.");
 
         ImGui.BeginDisabled(!config.SizeScalingEnabled);
 

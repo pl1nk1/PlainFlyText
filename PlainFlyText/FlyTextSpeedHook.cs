@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -13,35 +14,46 @@ namespace PlainFlyText;
 //
 //  - Update(float delta): multiplies the delta passed to the addon's own native
 //    update logic, for the speed slider. Confirmed working.
-//  - Draw(): for the size slider (experimental), walks the addon's node tree and
-//    writes ScaleX/ScaleY directly on leaf nodes (ChildCount == 0, and - critically
-//    - descending into Component nodes' own AtkUldManager.NodeList first, since
-//    those report ChildCount==0 themselves despite wrapping real children in a
-//    separate array; see ApplyScaleToLeaves). Applied immediately before calling
-//    the native Draw so our value is current at the exact moment rendering reads
-//    node state - this used to be applied from inside Update instead, which
-//    write-confirmed correctly (read back as the target value right after
-//    writing) but still rendered at native size, suggesting something between
-//    Update and Draw was resetting it. Diagnostic logging (throttled) reports
-//    what got touched each pass, since none of this can be verified without
-//    live testing.
+//  - Draw(): for the size slider (experimental), walks the addon's node tree
+//    (descending into Component nodes' own AtkUldManager.NodeList - see
+//    ApplyScale) and, for actual AtkTextNode leaves, scales the text-specific
+//    FontSize byte field rather than the generic AtkResNode ScaleX/ScaleY.
 //
-// Neither tweak touches position, font, or the label-blanking behavior in
-// Plugin.cs - speed only changes the delta value, and size only ever writes
-// node-local scale fields, so everything else about flytext stays native.
+//    Two earlier attempts wrote ScaleX/ScaleY instead (first from Update, then
+//    from Draw to rule out a timing race) - both write-confirmed correctly
+//    (read back as the target value immediately after writing) but produced no
+//    visible size change either way. That points away from a timing bug and
+//    toward FontSize being what actually drives glyph rasterization size for
+//    this render path, with generic node Scale doing something else (bounds/
+//    hit-testing) that doesn't affect the drawn glyph bitmap.
+//
+//    FontSize scaling needs a captured baseline per node (see baselineFontSize)
+//    rather than repeatedly multiplying the live value - Draw fires every frame
+//    for the same still-alive node, and multiplying an already-scaled value
+//    again next frame would compound exponentially. Baselines are captured the
+//    first time a node is seen and dropped once a node is no longer visited
+//    (it was destroyed/recycled), since AtkResNode pointers get reused for
+//    unrelated later entries.
+//
+// Neither tweak touches position, font *file*, or the label-blanking behavior in
+// Plugin.cs.
 internal sealed unsafe class FlyTextSpeedHook : IDisposable
 {
     private const int MaxRecursionDepth = 8;
     private const int MaxNodesPerPass = 4000;
-    private const float DiagnosticLogIntervalSeconds = 2f;
+    private const double DiagnosticLogIntervalSeconds = 2.0;
+    private const byte MinFontSize = 4;
+    private const byte MaxFontSize = 100;
 
     private readonly Configuration config;
     private readonly IGameGui gameGui;
+    private readonly Dictionary<nint, byte> baselineFontSize = new();
+    private readonly HashSet<nint> seenThisPass = new();
 
     private Hook<UpdateDelegate>? updateHook;
     private Hook<DrawDelegate>? drawHook;
     private IPluginLog? log;
-    private float diagnosticLogTimer;
+    private DateTime lastDiagnosticLog = DateTime.MinValue;
 
     public FlyTextSpeedHook(Configuration config, IGameGui gameGui)
     {
@@ -83,13 +95,14 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
 
     public void Dispose()
     {
-        // Reset any leaf scaling to native before unhooking, so we don't leave
-        // flytext stuck scaled if the plugin unloads/disables while enabled.
+        // Restore any tracked nodes to their captured baseline font size before
+        // unhooking, so we don't leave flytext stuck at a scaled size if the
+        // plugin unloads/disables while enabled.
         var addon = gameGui.GetAddonByName<AddonFlyText>("FlyText");
         if (addon != null && addon->RootNode != null)
         {
             var stats = default(TraversalStats);
-            ApplyScaleToLeaves(addon->RootNode, 1.0f, 0, ref stats);
+            ApplyScale(addon->RootNode, 1.0f, restoreOnly: true, 0, ref stats);
         }
 
         updateHook?.Disable();
@@ -105,48 +118,58 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
 
     private void DrawDetour(AddonFlyText* thisPtr)
     {
-        var targetScale = config.SizeScalingEnabled ? config.SizeMultiplier : 1.0f;
+        var sizeEnabled = config.SizeScalingEnabled;
+        var targetScale = sizeEnabled ? config.SizeMultiplier : 1.0f;
         var stats = default(TraversalStats);
 
-        var directChildren = 0;
+        seenThisPass.Clear();
+
         if (thisPtr->RootNode != null)
         {
-            var sibling = thisPtr->RootNode->ChildNode;
-            while (sibling != null && directChildren < MaxNodesPerPass)
-            {
-                directChildren++;
-                sibling = sibling->NextSiblingNode;
-            }
-
-            ApplyScaleToLeaves(thisPtr->RootNode, targetScale, 0, ref stats);
+            ApplyScale(thisPtr->RootNode, targetScale, restoreOnly: !sizeEnabled, 0, ref stats);
         }
 
-        if (config.SizeScalingEnabled)
+        // Drop baselines for nodes we didn't see this pass - they were destroyed
+        // or their pointer got recycled for something else. Left-behind entries
+        // here would apply a stale, wrong baseline if that memory becomes a new
+        // text node later.
+        if (baselineFontSize.Count > 0)
         {
-            // Draw() has no delta parameter, so throttle off ImGui's frame time
-            // instead - close enough for a diagnostic log interval.
-            diagnosticLogTimer += 1f / 60f;
-            if (diagnosticLogTimer >= DiagnosticLogIntervalSeconds)
+            var stale = new List<nint>();
+            foreach (var ptr in baselineFontSize.Keys)
             {
-                diagnosticLogTimer = 0f;
+                if (!seenThisPass.Contains(ptr))
+                {
+                    stale.Add(ptr);
+                }
+            }
+
+            foreach (var ptr in stale)
+            {
+                baselineFontSize.Remove(ptr);
+            }
+        }
+
+        if (sizeEnabled)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - lastDiagnosticLog).TotalSeconds >= DiagnosticLogIntervalSeconds)
+            {
+                lastDiagnosticLog = now;
                 log?.Information(
-                    "PlainFlyText: [Draw] root.ChildCount={ChildCount} vs walked {Walked} direct child(ren); " +
-                    "full traversal visited {Visited} node(s) ({Components} component(s) entered), max depth " +
-                    "{Depth}, {Leaves} leaf/leaves scaled to {Target}x. Sample leaf: type={LeafType} scale={LeafScale}.",
-                    thisPtr->RootNode != null ? thisPtr->RootNode->ChildCount : (ushort)0,
-                    directChildren,
+                    "PlainFlyText: [Draw] visited {Visited} node(s) ({Components} component(s) entered), max depth " +
+                    "{Depth}, {TextLeaves} text leaf/leaves font-scaled to {Target}x (tracked baselines: {Tracked}). " +
+                    "Sample: type={LeafType} baseline={Baseline} newSize={NewSize}.",
                     stats.TotalVisited,
                     stats.ComponentsEntered,
                     stats.MaxDepth,
-                    stats.LeavesScaled,
+                    stats.TextLeavesScaled,
                     targetScale,
+                    baselineFontSize.Count,
                     stats.SampleLeafType,
-                    stats.SampleLeafScale);
+                    stats.SampleBaseline,
+                    stats.SampleNewSize);
             }
-        }
-        else
-        {
-            diagnosticLogTimer = 0f;
         }
 
         drawHook!.Original(thisPtr);
@@ -155,14 +178,15 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
     private struct TraversalStats
     {
         public int TotalVisited;
-        public int LeavesScaled;
+        public int TextLeavesScaled;
         public int ComponentsEntered;
         public int MaxDepth;
         public NodeType SampleLeafType;
-        public float SampleLeafScale;
+        public byte SampleBaseline;
+        public byte SampleNewSize;
     }
 
-    private static void ApplyScaleToLeaves(AtkResNode* node, float scale, int depth, ref TraversalStats stats)
+    private void ApplyScale(AtkResNode* node, float scale, bool restoreOnly, int depth, ref TraversalStats stats)
     {
         if (node == null || depth > MaxRecursionDepth || stats.TotalVisited > MaxNodesPerPass)
         {
@@ -175,12 +199,9 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
             stats.MaxDepth = depth;
         }
 
-        // Component nodes (Type >= 1000, per FFXIVClientStructs' own NodeType doc
-        // comment) wrap a sub-widget whose real children live in the component's
-        // own AtkUldManager.NodeList - a completely separate array, not the plain
-        // ChildNode/NextSiblingNode chain. Confirmed via diagnostic logging: a
-        // component wrapper reported ChildCount==0 despite the addon's root
-        // claiming dozens of total descendants reachable only through it.
+        // Component nodes (Type >= 1000) wrap a sub-widget whose real children
+        // live in the component's own AtkUldManager.NodeList, not the plain
+        // ChildNode/NextSiblingNode chain every other node type uses.
         if ((ushort)node->Type >= 1000)
         {
             var component = ((AtkComponentNode*)node)->Component;
@@ -191,32 +212,51 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
                 var count = component->UldManager.NodeListCount;
                 for (var i = 0; i < count; i++)
                 {
-                    ApplyScaleToLeaves(nodeList[i], scale, depth + 1, ref stats);
+                    ApplyScale(nodeList[i], scale, restoreOnly, depth + 1, ref stats);
                 }
             }
 
             return;
         }
 
-        if (node->ChildCount == 0)
+        if (node->Type == NodeType.Text)
         {
-            node->ScaleX = scale;
-            node->ScaleY = scale;
+            var textNode = (AtkTextNode*)node;
+            var ptr = (nint)node;
+            seenThisPass.Add(ptr);
 
-            if (stats.LeavesScaled == 0)
+            if (!baselineFontSize.TryGetValue(ptr, out var baseline))
             {
-                stats.SampleLeafType = node->Type;
-                stats.SampleLeafScale = node->ScaleX;
+                baseline = textNode->FontSize;
+                baselineFontSize[ptr] = baseline;
             }
 
-            stats.LeavesScaled++;
+            var newSize = restoreOnly
+                ? baseline
+                : (byte)Math.Clamp((int)Math.Round(baseline * scale), MinFontSize, MaxFontSize);
+
+            textNode->FontSize = newSize;
+
+            if (stats.TextLeavesScaled == 0)
+            {
+                stats.SampleLeafType = node->Type;
+                stats.SampleBaseline = baseline;
+                stats.SampleNewSize = newSize;
+            }
+
+            stats.TextLeavesScaled++;
+            return;
+        }
+
+        if (node->ChildCount == 0)
+        {
             return;
         }
 
         var child = node->ChildNode;
         while (child != null)
         {
-            ApplyScaleToLeaves(child, scale, depth + 1, ref stats);
+            ApplyScale(child, scale, restoreOnly, depth + 1, ref stats);
             child = child->NextSiblingNode;
         }
     }
