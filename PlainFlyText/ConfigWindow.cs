@@ -10,14 +10,16 @@ internal sealed class ConfigWindow : Window
     private readonly Configuration config;
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly FlyTextSpeedHook speedHook;
+    private readonly FlyTextScaleController scaleController;
     private readonly string versionLabel;
 
-    public ConfigWindow(Configuration config, IDalamudPluginInterface pluginInterface, FlyTextSpeedHook speedHook)
+    public ConfigWindow(Configuration config, IDalamudPluginInterface pluginInterface, FlyTextSpeedHook speedHook, FlyTextScaleController scaleController)
         : base(BuildTitle(pluginInterface))
     {
         this.config = config;
         this.pluginInterface = pluginInterface;
         this.speedHook = speedHook;
+        this.scaleController = scaleController;
 
         versionLabel = $"v{pluginInterface.Manifest.AssemblyVersion}" + (pluginInterface.IsDev ? " (Dev)" : "");
 
@@ -63,17 +65,33 @@ internal sealed class ConfigWindow : Window
 
         ImGui.Separator();
 
+        if (!scaleController.IsAvailable)
+        {
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "Size control unavailable: the scale offsets failed to resolve.");
+            ImGui.TextWrapped("The slider below will have no effect. See /xllog for details.");
+        }
+
+        ImGui.BeginDisabled(!scaleController.IsAvailable);
+
         var sizeEnabled = config.SizeScalingEnabled;
-        if (ImGui.Checkbox("Enable size scaling (experimental)", ref sizeEnabled))
+        if (ImGui.Checkbox("Enable size scaling", ref sizeEnabled))
         {
             config.SizeScalingEnabled = sizeEnabled;
             pluginInterface.SavePluginConfig(config);
+
+            if (sizeEnabled)
+            {
+                scaleController.Apply(config.SizeMultiplier);
+            }
+            else
+            {
+                scaleController.RestoreNative();
+            }
         }
 
-        ImGui.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f),
-            "Experimental: scales the font size of flytext's individual text nodes " +
-            "directly, based on each node's own native size at the moment it's first " +
-            "seen. Check /xllog for diagnostic output while this is on. Try it and see.");
+        ImGui.TextWrapped("Overrides the same value FFXIV's own Character Configuration \"Flying " +
+                           "Text Size\"/\"Pop-up Text Size\" settings use, with finer control than " +
+                           "their 3 preset sizes. Applies to all flytext, not just damage/healing.");
 
         ImGui.BeginDisabled(!config.SizeScalingEnabled);
 
@@ -82,14 +100,17 @@ internal sealed class ConfigWindow : Window
         {
             config.SizeMultiplier = size;
             pluginInterface.SavePluginConfig(config);
+            scaleController.Apply(size);
         }
 
         ImGui.EndDisabled();
+        ImGui.EndDisabled();
 
-        if (ImGui.Button("Reset size to native (1.00x)"))
+        if (ImGui.Button("Reset size to your native setting"))
         {
-            config.SizeMultiplier = 1.0f;
+            config.SizeScalingEnabled = false;
             pluginInterface.SavePluginConfig(config);
+            scaleController.RestoreNative();
         }
     }
 }

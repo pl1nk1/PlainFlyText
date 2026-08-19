@@ -17,7 +17,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFlyTextGui FlyTextGui { get; private set; } = null!;
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInteropProvider { get; private set; } = null!;
-    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
+    [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
 
@@ -45,6 +45,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Configuration config;
     private readonly WindowSystem windowSystem;
     private readonly FlyTextSpeedHook speedHook;
+    private readonly FlyTextScaleController scaleController;
     private readonly ConfigWindow configWindow;
     private readonly Action openConfigUiHandler;
 
@@ -54,10 +55,17 @@ public sealed class Plugin : IDalamudPlugin
 
         windowSystem = new WindowSystem("PlainFlyText");
 
-        speedHook = new FlyTextSpeedHook(config, GameGui);
+        speedHook = new FlyTextSpeedHook(config);
         speedHook.Initialize(GameInteropProvider, Log);
 
-        configWindow = new ConfigWindow(config, PluginInterface, speedHook);
+        scaleController = new FlyTextScaleController();
+        scaleController.Initialize(SigScanner, Log);
+        if (config.SizeScalingEnabled && scaleController.IsAvailable)
+        {
+            scaleController.Apply(config.SizeMultiplier);
+        }
+
+        configWindow = new ConfigWindow(config, PluginInterface, speedHook, scaleController);
         windowSystem.AddWindow(configWindow);
 
         FlyTextGui.FlyTextCreated += OnFlyTextCreated;
@@ -106,6 +114,7 @@ public sealed class Plugin : IDalamudPlugin
         FlyTextGui.FlyTextCreated -= OnFlyTextCreated;
 
         speedHook.Dispose();
+        scaleController.RestoreNative();
         windowSystem.RemoveAllWindows();
     }
 }
