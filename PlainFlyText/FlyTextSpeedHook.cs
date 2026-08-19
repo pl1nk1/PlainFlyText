@@ -35,6 +35,13 @@ namespace PlainFlyText;
 //    (it was destroyed/recycled), since AtkResNode pointers get reused for
 //    unrelated later entries.
 //
+//    Writing FontSize alone was ALSO confirmed to have no visible effect - the
+//    node likely bakes its rendered glyph geometry once against whatever size
+//    it had when the text was set (SetNumber/SetText), and doesn't re-render
+//    just because the field changed underneath it afterward. FFXIVClientStructs
+//    exposes AtkTextNode.ResizeNodeForCurrentText() (its own resolved signature,
+//    not ours) for exactly this - called once per actual size change.
+//
 // Neither tweak touches position, font *file*, or the label-blanking behavior in
 // Plugin.cs.
 internal sealed unsafe class FlyTextSpeedHook : IDisposable
@@ -235,7 +242,18 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
                 ? baseline
                 : (byte)Math.Clamp((int)Math.Round(baseline * scale), MinFontSize, MaxFontSize);
 
-            textNode->FontSize = newSize;
+            if (textNode->FontSize != newSize)
+            {
+                textNode->FontSize = newSize;
+
+                // Changing FontSize alone doesn't appear to be enough - the node
+                // likely bakes its rendered glyph geometry once against whatever
+                // size it had when the text was set, and doesn't re-render just
+                // because the field changed underneath it. This forces that
+                // recalculation. Only called on an actual change, not every
+                // frame, since it's presumably not a free operation.
+                textNode->ResizeNodeForCurrentText();
+            }
 
             if (stats.TextLeavesScaled == 0)
             {
