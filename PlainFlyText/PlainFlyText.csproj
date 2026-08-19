@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>PlainFlyText</RootNamespace>
     <AssemblyName>PlainFlyText</AssemblyName>
-    <Version>1.0.0.0</Version>
+    <Version>1.2.0.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <!-- Local Dalamud dev build, confirmed present on this machine (Dalamud 15.0.3.2, net10.0). -->

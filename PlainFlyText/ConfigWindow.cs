@@ -10,20 +10,34 @@ internal sealed class ConfigWindow : Window
     private readonly Configuration config;
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly FlyTextSpeedHook speedHook;
+    private readonly string versionLabel;
 
     public ConfigWindow(Configuration config, IDalamudPluginInterface pluginInterface, FlyTextSpeedHook speedHook)
-        : base("PlainFlyText Settings##PlainFlyText")
+        : base(BuildTitle(pluginInterface))
     {
         this.config = config;
         this.pluginInterface = pluginInterface;
         this.speedHook = speedHook;
 
+        versionLabel = $"v{pluginInterface.Manifest.AssemblyVersion}" + (pluginInterface.IsDev ? " (Dev)" : "");
+
         Size = new Vector2(420, 320);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
+    // Version is baked into the window title (##id suffix keeps window identity
+    // stable across version bumps) so it's visible even before opening the window
+    // if the title bar is glanced at, e.g. in a taskbar/window list.
+    private static string BuildTitle(IDalamudPluginInterface pluginInterface)
+        => $"PlainFlyText Settings - v{pluginInterface.Manifest.AssemblyVersion}"
+           + (pluginInterface.IsDev ? " (Dev)" : string.Empty)
+           + "##PlainFlyText";
+
     public override void Draw()
     {
+        ImGui.TextDisabled(versionLabel);
+        ImGui.Separator();
+
         if (!speedHook.IsAvailable)
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "Speed control unavailable: the native hook failed to load.");
