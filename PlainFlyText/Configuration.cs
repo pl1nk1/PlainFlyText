@@ -12,4 +12,11 @@ internal sealed class Configuration : IPluginConfiguration
     // the damage/healing numbers - it's a single per-addon time-scale, not something
     // that can be scoped to individual entries without much deeper native work.
     public float SpeedMultiplier { get; set; } = 1.0f;
+
+    // Scales the whole native FlyText addon window - see FlyTextScaleController for
+    // the positioning caveat. Off by default; SizeMultiplier only applies while
+    // SizeScalingEnabled is true.
+    public bool SizeScalingEnabled { get; set; } = false;
+
+    public float SizeMultiplier { get; set; } = 1.0f;
 }
