@@ -124,11 +124,12 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
                 diagnosticLogTimer = 0f;
                 log?.Information(
                     "PlainFlyText: root.ChildCount={ChildCount} vs walked {Walked} direct child(ren); " +
-                    "full traversal visited {Visited} node(s), max depth {Depth}, {Leaves} leaf/leaves scaled " +
-                    "to {Target}x. Sample leaf: type={LeafType} scale={LeafScale}.",
+                    "full traversal visited {Visited} node(s) ({Components} component(s) entered), max depth " +
+                    "{Depth}, {Leaves} leaf/leaves scaled to {Target}x. Sample leaf: type={LeafType} scale={LeafScale}.",
                     thisPtr->RootNode != null ? thisPtr->RootNode->ChildCount : (ushort)0,
                     directChildren,
                     stats.TotalVisited,
+                    stats.ComponentsEntered,
                     stats.MaxDepth,
                     stats.LeavesScaled,
                     targetScale,
@@ -146,6 +147,7 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
     {
         public int TotalVisited;
         public int LeavesScaled;
+        public int ComponentsEntered;
         public int MaxDepth;
         public NodeType SampleLeafType;
         public float SampleLeafScale;
@@ -162,6 +164,29 @@ internal sealed unsafe class FlyTextSpeedHook : IDisposable
         if (depth > stats.MaxDepth)
         {
             stats.MaxDepth = depth;
+        }
+
+        // Component nodes (Type >= 1000, per FFXIVClientStructs' own NodeType doc
+        // comment) wrap a sub-widget whose real children live in the component's
+        // own AtkUldManager.NodeList - a completely separate array, not the plain
+        // ChildNode/NextSiblingNode chain. Confirmed via diagnostic logging: a
+        // component wrapper reported ChildCount==0 despite the addon's root
+        // claiming dozens of total descendants reachable only through it.
+        if ((ushort)node->Type >= 1000)
+        {
+            var component = ((AtkComponentNode*)node)->Component;
+            if (component != null)
+            {
+                stats.ComponentsEntered++;
+                var nodeList = component->UldManager.NodeList;
+                var count = component->UldManager.NodeListCount;
+                for (var i = 0; i < count; i++)
+                {
+                    ApplyScaleToLeaves(nodeList[i], scale, depth + 1, ref stats);
+                }
+            }
+
+            return;
         }
 
         if (node->ChildCount == 0)
