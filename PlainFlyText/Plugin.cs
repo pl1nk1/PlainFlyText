@@ -17,6 +17,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFlyTextGui FlyTextGui { get; private set; } = null!;
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider GameInteropProvider { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
     [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
@@ -46,6 +47,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem windowSystem;
     private readonly FlyTextSpeedHook speedHook;
     private readonly FlyTextScaleController scaleController;
+    private readonly FlyTextPositionController positionController;
     private readonly ConfigWindow configWindow;
     private readonly Action openConfigUiHandler;
 
@@ -65,7 +67,11 @@ public sealed class Plugin : IDalamudPlugin
             scaleController.Apply(config.SizeMultiplier);
         }
 
-        configWindow = new ConfigWindow(config, PluginInterface, speedHook, scaleController);
+        positionController = new FlyTextPositionController(config, GameGui);
+        positionController.Initialize(SigScanner, GameInteropProvider, Log);
+        positionController.Apply();
+
+        configWindow = new ConfigWindow(config, PluginInterface, speedHook, scaleController, positionController);
         windowSystem.AddWindow(configWindow);
 
         FlyTextGui.FlyTextCreated += OnFlyTextCreated;
@@ -115,6 +121,7 @@ public sealed class Plugin : IDalamudPlugin
 
         speedHook.Dispose();
         scaleController.RestoreNative();
+        positionController.Dispose();
         windowSystem.RemoveAllWindows();
     }
 }
